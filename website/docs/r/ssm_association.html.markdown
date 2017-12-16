@@ -64,6 +64,17 @@ resource "aws_ssm_association" "foo" {
 }
 ```
 
+Example of using the targets parameter:
+```
+  resource "aws_ssm_association" "foo" {
+    name        = "test_document_association-%s"
+    targets     = {
+      key    = "tag:Name"
+      values = ["FooAppName"]
+    }
+  }
+```
+
 ## Argument Reference
 
 The following arguments are supported:
@@ -72,7 +83,7 @@ The following arguments are supported:
 * `association_name` - (Optional) The descriptive name for the association.
 * `instance_id` - (Optional) The instance id to apply an SSM document to.
 * `parameters` - (Optional) Additional parameters to pass to the SSM document.
-* `targets` - (Optional) The targets (either instances or tags). Instances are specified using Key=instanceids,Values=instanceid1,instanceid2. Tags are specified using Key=tag name,Values=tag value. Only 1 target is currently supported by AWS.
+* `targets` - (Optional) The targets (either instances or tags). Instances are specified using a map with the parameters "key" and "values". Only 1 target is currently supported by AWS.
 * `schedule_expression` - (Optional) A cron expression when the association will be applied to the target(s).
 * `output_location` - (Optional) An output location block. OutputLocation documented below.
 * `document_version` - (Optional) The document version you want to associate with the target(s). Can be a specific version or the default version.
