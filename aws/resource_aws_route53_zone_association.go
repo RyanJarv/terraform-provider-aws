@@ -82,12 +82,15 @@ func resourceAwsRoute53ZoneAssociationCreate(d *schema.ResourceData, meta interf
 
 	resp, apiErr := r53.AssociateVPCWithHostedZone(req)
 	if apiErr != nil {
-		log.Println("msg: ", apiErr.Error())
-		fmt.Println("error msg: ", d.Get("zone_id").(string))
-
-		if match, compileErr := regexp.Match(exists, []byte(apiErr.Error())); compileErr != nil {
-			return compileErr
-		} else if !match {
+		// Ignore already associated errors if the hosted zone isn't in our account
+		if d.Get("cross_account").(bool) {
+			match, compileErr := regexp.Match(exists, []byte(apiErr.Error()))
+			if compileErr != nil {
+				return compileErr
+			} else if !match {
+				return apiErr
+			}
+		} else {
 			return apiErr
 		}
 	}
@@ -98,18 +101,25 @@ func resourceAwsRoute53ZoneAssociationCreate(d *schema.ResourceData, meta interf
 	var refreshFunc func() (result interface{}, state string, err error)
 
 	if d.Get("cross_account").(bool) {
+		// In a cross a
 		refreshFunc = func() (result interface{}, state string, err error) {
-			resp, err = r53.AssociateVPCWithHostedZone(req)
-			// TODO: don't ignore other errors
-			if match, _ := regexp.Match(exists, []byte(err.Error())); match {
-				log.Println("error msg insync: ", err.Error())
-				fmt.Println("error msg insync: ", d.Get("zone_id").(string))
-				return true, "INSYNC", nil
-			} else {
-				log.Println("error msg pending: ", err.Error())
-				fmt.Println("error msg pending: ", d.Get("zone_id").(string))
+			_, apiErr := r53.AssociateVPCWithHostedZone(req)
+
+			if apiErr == nil {
+				// call succeeded because we're associated yet
 				return true, "PENDING", nil
+			} else {
+				if match, compileErr := regexp.Match(exists, []byte(apiErr.Error())); match {
+					if compileErr != nil {
+						return nil, "UNKNOWN", compileErr
+					}
+					// call errored because we're associated
+					return true, "INSYNC", nil
+				}
 			}
+
+			// call errored for some other reason
+			return nil, "UNKNOWN", apiErr
 		}
 	} else {
 		// Wait until we are done initializing
