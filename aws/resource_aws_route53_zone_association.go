@@ -3,6 +3,7 @@ package aws
 import (
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,6 +42,13 @@ func resourceAwsRoute53ZoneAssociation() *schema.Resource {
 				Computed: true,
 				ForceNew: true,
 			},
+
+			"cross_account": {
+				Type:     schema.TypeBool,
+				Optional: true,
+				Default:  false,
+				ForceNew: true,
+			},
 		},
 	}
 }
@@ -61,40 +69,69 @@ func resourceAwsRoute53ZoneAssociationCreate(d *schema.ResourceData, meta interf
 	}
 
 	log.Printf("[DEBUG] Associating Route53 Private Zone %s with VPC %s with region %s", *req.HostedZoneId, *req.VPC.VPCId, *req.VPC.VPCRegion)
-	var err error
-	wait := true
-	resp, err := r53.AssociateVPCWithHostedZone(req)
-	if err != nil {
-		log.Println("asdf ", d.Get("zone_id").(string))
-		if strings.Contains(err.Error(), d.Get("zone_id").(string)) {
-			wait = false
-		} else {
-			return err
+
+	zone_id := d.Get("zone_id").(string)
+	vpc_id := d.Get("vpc_id").(string)
+
+	// Ignore errors that indicate we're already associated with this hosted zone. We will use this to determine the
+	// current state of the account when we are associating with a hosted zone in another account.
+	//
+	// If the Route53 API ever add's the ability to determine current associations of an account then this should be
+	// replaced to use that.
+	exists := fmt.Sprintf(`ConflictingDomainExists: The VPC %s .* associated with the hosted zone %s .*`, vpc_id, zone_id)
+
+	resp, apiErr := r53.AssociateVPCWithHostedZone(req)
+	if apiErr != nil {
+		log.Println("msg: ", apiErr.Error())
+		fmt.Println("error msg: ", d.Get("zone_id").(string))
+
+		if match, compileErr := regexp.Match(exists, []byte(apiErr.Error())); compileErr != nil {
+			return compileErr
+		} else if !match {
+			return apiErr
 		}
 	}
 
 	// Store association id
 	d.SetId(fmt.Sprintf("%s:%s", *req.HostedZoneId, *req.VPC.VPCId))
 
-	if wait {
+	var refreshFunc func() (result interface{}, state string, err error)
+
+	if d.Get("cross_account").(bool) {
+		refreshFunc = func() (result interface{}, state string, err error) {
+			resp, err = r53.AssociateVPCWithHostedZone(req)
+			// TODO: don't ignore other errors
+			if match, _ := regexp.Match(exists, []byte(err.Error())); match {
+				log.Println("error msg insync: ", err.Error())
+				fmt.Println("error msg insync: ", d.Get("zone_id").(string))
+				return true, "INSYNC", nil
+			} else {
+				log.Println("error msg pending: ", err.Error())
+				fmt.Println("error msg pending: ", d.Get("zone_id").(string))
+				return true, "PENDING", nil
+			}
+		}
+	} else {
 		// Wait until we are done initializing
-		wait := resource.StateChangeConf{
-			Delay:      30 * time.Second,
-			Pending:    []string{"PENDING"},
-			Target:     []string{"INSYNC"},
-			Timeout:    10 * time.Minute,
-			MinTimeout: 2 * time.Second,
-			Refresh: func() (result interface{}, state string, err error) {
-				changeRequest := &route53.GetChangeInput{
-					Id: aws.String(cleanChangeID(*resp.ChangeInfo.Id)),
-				}
-				return resourceAwsGoRoute53Wait(r53, changeRequest)
-			},
+		refreshFunc = func() (result interface{}, state string, err error) {
+			changeRequest := &route53.GetChangeInput{
+				Id: aws.String(cleanChangeID(*resp.ChangeInfo.Id)),
+			}
+			return resourceAwsGoRoute53Wait(r53, changeRequest)
 		}
-		_, err = wait.WaitForState()
-		if err != nil {
-			return err
-		}
+	}
+
+	wait := resource.StateChangeConf{
+		Delay:      30 * time.Second,
+		Pending:    []string{"PENDING"},
+		Target:     []string{"INSYNC"},
+		Timeout:    10 * time.Minute,
+		MinTimeout: 2 * time.Second,
+		Refresh:    refreshFunc,
+	}
+	_, err := wait.WaitForState()
+	if err != nil {
+		return err
 	}
 
 	return resourceAwsRoute53ZoneAssociationRead(d, meta)
